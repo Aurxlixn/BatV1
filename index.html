@@ -1,1 +1,182 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<title>Pilotage du bateau</title>
+<style>
+:root {
+  --bg: #e9eff1; --surface: #f8fafb; --ink: #11283a; --muted: #5d7280; --line: #c3d0d6;
+  --babord: #c8372d; --tribord: #1f8a5b; --go: #11283a; --stop: #c8372d; --knob: #11283a;
+  box-sizing: border-box;
+  padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d1a24; --surface: #15293a; --ink: #e6eef2; --muted: #8fa5b3; --line: #2b4357;
+    --babord: #e5564b; --tribord: #3fb987; --go: #e6eef2; --stop: #e5564b; --knob: #e6eef2;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0d1a24; --surface: #15293a; --ink: #e6eef2; --muted: #8fa5b3; --line: #2b4357;
+  --babord: #e5564b; --tribord: #3fb987; --go: #e6eef2; --stop: #e5564b; --knob: #e6eef2;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; }
+body {
+  background: var(--bg); color: var(--ink);
+  font-family: "Avenir Next", "Segoe UI", system-ui, sans-serif;
+  -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent; touch-action: none;
+}
 
+/* Disposition paysage : vitesse | marche-arrêt | barre */
+.pupitre {
+  height: 100%; display: grid; grid-template-columns: auto 1fr auto;
+  align-items: center; gap: 12px; padding: 10px 20px;
+}
+.bloc { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.entete { display: flex; align-items: baseline; gap: 10px; }
+.entete h2 { font-size: .95rem; font-weight: 600; margin: 0; }
+.valeur { font-size: 1.5rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.detail { color: var(--muted); font-size: .85rem; min-height: 1.2em; }
+
+/* Joysticks */
+.stick {
+  position: relative; background: var(--surface); border: 2px solid var(--line);
+  border-radius: 999px; touch-action: none; cursor: grab;
+}
+.stick.v { width: 100px; height: clamp(150px, calc(100dvh - 130px), 250px); }
+.stick.h { width: 320px; height: 100px; }
+.stick .knob {
+  position: absolute; left: 50%; top: 50%; width: 66px; height: 66px; margin: -33px 0 0 -33px;
+  border-radius: 50%; background: var(--knob);
+}
+.stick .centre { position: absolute; background: var(--line); }
+.stick.v .centre { left: 18px; right: 18px; top: 50%; height: 2px; }
+.stick.h .centre { top: 18px; bottom: 18px; left: 50%; width: 2px; }
+.stick.actif { border-color: var(--ink); }
+.stick.off { opacity: .4; }
+.stick.h { background: linear-gradient(90deg,
+  color-mix(in srgb, var(--babord) 22%, var(--surface)) 0 50%,
+  color-mix(in srgb, var(--tribord) 22%, var(--surface)) 50% 100%); }
+.cotes { display: flex; justify-content: space-between; width: 320px; font-size: .85rem; font-weight: 600; }
+.cotes .b { color: var(--babord); } .cotes .t { color: var(--tribord); }
+
+/* Bouton marche / arrêt */
+.centre-col { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.etat { color: var(--muted); font-size: .9rem; margin: 0; text-align: center; }
+#marche {
+  width: 130px; height: 130px; border-radius: 50%; border: 0; cursor: pointer;
+  font: inherit; font-size: 1.1rem; font-weight: 700; color: var(--bg);
+  background: var(--go); touch-action: manipulation; transition: background .2s, transform .1s;
+}
+#marche:active { transform: scale(.96); }
+#marche.on { background: var(--stop); color: #fff; }
+#marche:focus-visible { outline: 3px solid var(--ink); outline-offset: 4px; }
+
+/* Consigne si l'iPhone est en portrait */
+.tourner { display: none; }
+@media (orientation: portrait) {
+  .pupitre { display: none; }
+  .tourner {
+    display: flex; height: 100%; align-items: center; justify-content: center;
+    text-align: center; padding: 24px; font-size: 1.1rem; color: var(--muted);
+  }
+}
+@media (prefers-reduced-motion: reduce) { #marche { transition: none; } }
+</style>
+</head>
+<body>
+<p class="tourner">Tourne ton iPhone en mode paysage pour piloter.</p>
+
+<main class="pupitre">
+  <section class="bloc" aria-label="Vitesse">
+    <div class="entete"><h2>Vitesse</h2><span class="valeur" id="vVitesse">0 %</span></div>
+    <div class="stick v off" id="gaz" role="slider" aria-label="Vitesse, avant et arrière">
+      <div class="centre"></div><div class="knob"></div>
+    </div>
+    <div class="detail" id="dVitesse">Point mort</div>
+  </section>
+
+  <section class="centre-col">
+    <p class="etat" id="etat">Moteur à l'arrêt</p>
+    <button id="marche" type="button" aria-pressed="false">MARCHE</button>
+  </section>
+
+  <section class="bloc" aria-label="Barre">
+    <div class="entete"><h2>Barre</h2><span class="valeur" id="vBarre">0°</span></div>
+    <div class="stick h" id="barre" role="slider" aria-label="Angle de barre, bâbord et tribord">
+      <div class="centre"></div><div class="knob"></div>
+    </div>
+    <div class="cotes"><span class="b">Bâbord</span><span class="t">Tribord</span></div>
+    <div class="detail" id="dBarre">Barre au centre</div>
+  </section>
+</main>
+
+<script>
+const ANGLE_MAX = 45;   // la barre va de -45° (bâbord) à +45° (tribord), 0° = centre
+
+// Joystick : renvoie une valeur entre -1 et +1, et revient au centre quand on lâche
+function creerStick(el, axe, onChange) {
+  const knob = el.querySelector('.knob');
+  let actif = false, id = null;
+
+  function placer(v) {
+    const max = ((axe === 'y' ? el.clientHeight : el.clientWidth) - knob.offsetWidth) / 2;
+    const px = (axe === 'y' ? -v : v) * max;
+    knob.style.transform = axe === 'y' ? `translateY(${px}px)` : `translateX(${px}px)`;
+  }
+  function lire(e) {
+    const r = el.getBoundingClientRect();
+    const max = ((axe === 'y' ? r.height : r.width) - knob.offsetWidth) / 2;
+    const d = axe === 'y' ? (r.top + r.height / 2 - e.clientY) : (e.clientX - (r.left + r.width / 2));
+    const v = Math.max(-1, Math.min(1, d / max));
+    placer(v); onChange(v);
+  }
+  el.addEventListener('pointerdown', e => {
+    if (el.classList.contains('off')) return;
+    actif = true; id = e.pointerId; el.setPointerCapture(id);
+    el.classList.add('actif'); lire(e);
+  });
+  el.addEventListener('pointermove', e => { if (actif && e.pointerId === id) lire(e); });
+  const fin = () => { if (!actif) return; actif = false; el.classList.remove('actif'); placer(0); onChange(0); };
+  el.addEventListener('pointerup', fin);
+  el.addEventListener('pointercancel', fin);
+  return { reset: () => { actif = false; el.classList.remove('actif'); placer(0); onChange(0); } };
+}
+
+const $ = id => document.getElementById(id);
+let vitesse = 0, angle = 0;
+
+const gaz = creerStick($('gaz'), 'y', v => {
+  vitesse = Math.round(v * 100);
+  $('vVitesse').textContent = (vitesse > 0 ? '+' : '') + vitesse + ' %';
+  $('dVitesse').textContent = vitesse > 0 ? 'Avant' : vitesse < 0 ? 'Arrière' : 'Point mort';
+});
+
+const barre = creerStick($('barre'), 'x', v => {
+  angle = Math.round(v * ANGLE_MAX);
+  $('vBarre').textContent = (angle > 0 ? '+' : '') + angle + '°';
+  $('dBarre').textContent = angle === 0 ? 'Barre au centre'
+    : (angle < 0 ? 'Bâbord ' : 'Tribord ') + Math.abs(angle) + '°';
+});
+
+// Marche / arrêt
+let marche = false;
+$('marche').addEventListener('click', () => {
+  marche = !marche;
+  const b = $('marche');
+  b.textContent = marche ? 'ARRÊT' : 'MARCHE';
+  b.classList.toggle('on', marche);
+  b.setAttribute('aria-pressed', marche);
+  $('gaz').classList.toggle('off', !marche);
+  $('etat').textContent = marche ? 'Moteur en marche' : "Moteur à l'arrêt";
+  if (!marche) gaz.reset();   // l'arrêt remet la vitesse à zéro
+});
+</script>
+</body>
+</html>
