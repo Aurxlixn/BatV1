@@ -45,8 +45,32 @@ body[data-perdue="1"]        { --c:var(--rouge); }
 }
 #urgence:not(:disabled) { background:var(--rouge); color:#fff; border-color:transparent; cursor:pointer; }
 .lien { justify-self:end; font-size:.8rem; color:var(--muted); display:flex; gap:8px; align-items:center; }
-#coupure { font:inherit; font-size:.75rem; padding:2px 8px; border-radius:6px; border:1px solid var(--line);
-           background:transparent; color:var(--muted); cursor:pointer; }
+
+/* Panneau de liaison Bluetooth (s'ouvre et se ferme sans JavaScript) */
+.liaison { position:relative; }
+.liaison summary {
+  list-style:none; cursor:pointer; font-size:.75rem; padding:3px 10px; border-radius:6px;
+  border:1px solid var(--line); background:transparent; color:var(--muted);
+}
+.liaison summary::-webkit-details-marker { display:none; }
+.liaison[open] summary { color:var(--ink); border-color:var(--ink); }
+.panneau {
+  position:absolute; right:0; top:calc(100% + 6px); z-index:10; width:min(320px, 60vw);
+  padding:10px; border-radius:12px; background:var(--surface); border:1px solid var(--line);
+  display:flex; flex-direction:column; gap:8px;
+}
+.panneau h2 { margin:0; font-size:.85rem; font-weight:600; color:var(--ink); }
+#testEnvoi {
+  font:inherit; font-size:.8rem; font-weight:600; padding:8px 12px; border-radius:8px;
+  border:1px solid var(--line); background:var(--bg); color:var(--ink); cursor:pointer; touch-action:manipulation;
+}
+#testEnvoi:disabled { opacity:.4; cursor:not-allowed; }
+#journal {
+  margin:0; padding:8px; height:130px; overflow-y:auto; touch-action:pan-y;
+  font-family:ui-monospace,Menlo,Consolas,monospace; font-size:.7rem; line-height:1.4;
+  white-space:pre-wrap; background:var(--bg); border-radius:8px; color:var(--muted);
+  -webkit-user-select:text; user-select:text;
+}
 
 /* Centre : joysticks et valeurs */
 .corps { display:grid; grid-template-columns:auto 1fr auto; align-items:center; gap:12px; min-height:0; }
@@ -99,7 +123,17 @@ body[data-perdue="1"]        { --c:var(--rouge); }
   <div class="haut">
     <span class="pastille" id="pastille">Non connecté</span>
     <button id="urgence" type="button" disabled>URGENCE</button>
-    <div class="lien"><span id="lienTxt"></span><button id="coupure" type="button">Couper (test)</button></div>
+    <div class="lien">
+      <span id="lienTxt">Bluetooth : non connecté</span>
+      <details class="liaison" id="liaison">
+        <summary>Liaison</summary>
+        <div class="panneau">
+          <h2>Liaison Bluetooth</h2>
+          <button id="testEnvoi" type="button" disabled>Envoyer un test</button>
+          <pre id="journal"></pre>
+        </div>
+      </details>
+    </div>
   </div>
 
   <div class="corps">
@@ -126,139 +160,9 @@ body[data-perdue="1"]        { --c:var(--rouge); }
   </div>
 </div>
 
-<script>
-// ---------- Réglages ----------
-const ANGLE_MAX = 45;          // barre : -45° à +45°
-const ZONE_MORTE = 0.06;       // petite zone neutre au centre des joysticks
-const DUREE_MAINTIEN = 1000;   // ms pour réarmer
-const FENETRE_DOUBLE = 700;    // ms entre les deux appuis d'un double clic
-
-const ETATS = {
-  deconnecte: { nom:'Non connecté', bouton:'Se connecter', aide:'Un appui',       mode:'simple'   },
-  verrouille: { nom:'Verrouillé',   bouton:'Réarmer',      aide:'Maintenir 1 s',  mode:'maintien' },
-  pret:       { nom:'Prêt',         bouton:'Démarrer',     aide:'Double clic',    mode:'double'   },
-  marche:     { nom:'En marche',    bouton:'Arrêt',        aide:'Double clic',    mode:'double'   }
-};
-
-const $ = id => document.getElementById(id);
-let etat = 'deconnecte', liaisonPerdue = false, vitesse = 0, angle = 0;
-
-// ---------- Joystick (valeur de -1 à +1, retour au centre au relâchement) ----------
-function creerStick(el, axe, onChange) {
-  const knob = el.querySelector('.knob');
-  let actif = false, id = null, permis = false;
-
-  function placer(v) {
-    const max = ((axe === 'y' ? el.clientHeight : el.clientWidth) - knob.offsetWidth) / 2;
-    const px = (axe === 'y' ? -v : v) * max;
-    knob.style.transform = axe === 'y' ? `translateY(${px}px)` : `translateX(${px}px)`;
-  }
-  function lire(e) {
-    const r = el.getBoundingClientRect();
-    const max = ((axe === 'y' ? r.height : r.width) - knob.offsetWidth) / 2;
-    const d = axe === 'y' ? (r.top + r.height / 2 - e.clientY) : (e.clientX - (r.left + r.width / 2));
-    const v = Math.max(-1, Math.min(1, d / max));
-    placer(v);
-    onChange(Math.abs(v) < ZONE_MORTE ? 0 : v);
-  }
-  function reset() { actif = false; el.classList.remove('actif'); placer(0); onChange(0); }
-
-  el.addEventListener('pointerdown', e => {
-    if (!permis) return;
-    actif = true; id = e.pointerId; el.setPointerCapture(id); el.classList.add('actif'); lire(e);
-  });
-  el.addEventListener('pointermove', e => { if (actif && e.pointerId === id) lire(e); });
-  el.addEventListener('pointerup', () => { if (actif) reset(); });
-  el.addEventListener('pointercancel', () => { if (actif) reset(); });
-
-  return { activer(b) { permis = b; el.classList.toggle('off', !b); if (!b) reset(); } };
-}
-
-const gaz = creerStick($('gaz'), 'y', v => { vitesse = Math.round(v * 100); afficherValeurs(); });
-const barre = creerStick($('barre'), 'x', v => { angle = Math.round(v * ANGLE_MAX); afficherValeurs(); });
-
-function afficherValeurs() {
-  const off = etat === 'deconnecte';
-  $('vVit').textContent = off ? '—' : (vitesse > 0 ? '+' : '') + vitesse + ' %';
-  $('vBar').textContent = off ? '—' : (angle > 0 ? '+' : '') + angle + '°';
-}
-
-// ---------- Machine à états ----------
-function aller(nouvelEtat) {
-  etat = nouvelEtat;
-  desarmer();
-  render();
-}
-
-function render() {
-  const e = ETATS[etat];
-  document.body.dataset.etat = etat;
-  document.body.dataset.perdue = (liaisonPerdue && etat === 'deconnecte') ? '1' : '0';
-  $('pastille').textContent = (liaisonPerdue && etat === 'deconnecte') ? 'Liaison perdue' : e.nom;
-  $('urgence').disabled = !(etat === 'pret' || etat === 'marche');
-  $('lienTxt').textContent = etat === 'deconnecte' ? 'Bluetooth : démo, non connecté' : 'Connecté (démo)';
-  $('coupure').style.display = etat === 'deconnecte' ? 'none' : '';
-  gaz.activer(etat === 'marche');                     // vitesse : seulement en marche
-  barre.activer(etat === 'pret' || etat === 'marche'); // barre : prêt et en marche
-  afficherBouton();
-  afficherValeurs();
-}
-
-// ---------- Urgence : un seul appui, réagit dès le contact ----------
-$('urgence').addEventListener('pointerdown', () => {
-  if (etat === 'pret' || etat === 'marche') aller('verrouille');
-});
-
-// ---------- Liaison simulée ----------
-$('coupure').addEventListener('click', () => {
-  if (etat !== 'deconnecte') { liaisonPerdue = true; aller('deconnecte'); }
-});
-
-// ---------- Bouton d'action ----------
-let minuteur = null, timerArme = null, armeJusqua = 0, ignorerClic = false;
-const act = $('act'), fill = act.querySelector('.fill');
-
-function afficherBouton() {
-  const e = ETATS[etat];
-  const arme = Date.now() < armeJusqua;
-  $('actTxt').textContent = arme ? 'Touche encore' : e.bouton;
-  $('aide').textContent = e.aide;
-  act.classList.toggle('arme', arme);
-}
-function desarmer() { clearTimeout(timerArme); armeJusqua = 0; afficherBouton(); }
-function annulerMaintien() { clearTimeout(minuteur); minuteur = null; fill.classList.remove('go'); }
-
-// Maintien (réarmer) : jauge qui se remplit pendant 1 s
-act.addEventListener('pointerdown', () => {
-  ignorerClic = false;
-  if (ETATS[etat].mode !== 'maintien') return;
-  fill.classList.add('go');
-  minuteur = setTimeout(() => {
-    annulerMaintien();
-    ignorerClic = true;      // le relâchement ne doit pas compter comme un premier clic
-    aller('pret');
-  }, DUREE_MAINTIEN);
-});
-['pointerup', 'pointercancel', 'pointerleave'].forEach(t => act.addEventListener(t, annulerMaintien));
-
-// Appui simple (connexion) et double clic (démarrer / arrêter)
-act.addEventListener('click', () => {
-  if (ignorerClic) { ignorerClic = false; return; }
-  const mode = ETATS[etat].mode;
-  if (mode === 'simple') {
-    liaisonPerdue = false;
-    aller('verrouille');                     // toute connexion démarre verrouillée
-  } else if (mode === 'double') {
-    if (Date.now() < armeJusqua) {           // second appui dans la fenêtre : on valide
-      aller(etat === 'pret' ? 'marche' : 'pret');
-    } else {                                 // premier appui : on arme et on le montre
-      armeJusqua = Date.now() + FENETRE_DOUBLE;
-      afficherBouton();
-      timerArme = setTimeout(desarmer, FENETRE_DOUBLE);
-    }
-  }
-});
-
+<script src="script.js"></script>
+</body>
+</html>
 render();
 </script>
 </body>
