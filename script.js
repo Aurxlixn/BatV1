@@ -1,8 +1,8 @@
 // ---------- Bluetooth micro:bit : connexion seule ----------
+const VERSION_SCRIPT = 2;
 
 // Service Bluetooth UART de la micro:bit
-const UART_SERVICE  = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
-const UART_ECRITURE = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';   // page -> micro:bit
+const UART_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
 
 const $ = id => document.getElementById(id);
 
@@ -62,7 +62,13 @@ async function connecter() {
 
     const serveur = await appareil.gatt.connect();
     const service = await serveur.getPrimaryService(UART_SERVICE);
-    caracEcriture = await service.getCharacteristic(UART_ECRITURE);
+
+    // On prend le canal qui accepte l'écriture (son code varie selon les cartes)
+    const caracs = await service.getCharacteristics();
+    const choisi = caracs.find(c => c.properties.write || c.properties.writeWithoutResponse);
+    if (!choisi) throw new Error("Aucun canal d'écriture trouvé");
+    caracEcriture = choisi;
+    journal("Canal d'écriture : " + choisi.uuid.slice(0, 8));
 
     liaisonPerdue = false;
     journal('Connecté à ' + appareil.name);
@@ -90,7 +96,7 @@ async function envoyer(texte) {
   enEcriture = true;
   try {
     const octets = new TextEncoder().encode(texte + '\n');
-    if (caracEcriture.writeValueWithoutResponse) {
+    if (caracEcriture.properties.writeWithoutResponse) {
       await caracEcriture.writeValueWithoutResponse(octets);
     } else {
       await caracEcriture.writeValue(octets);
@@ -111,3 +117,4 @@ $('act').addEventListener('click', () => {
 $('testEnvoi').addEventListener('click', () => envoyer('bonjour'));
 
 afficherLiaison();
+journal('Script version ' + VERSION_SCRIPT + ' chargé');
