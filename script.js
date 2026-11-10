@@ -116,5 +116,83 @@ $('act').addEventListener('click', () => {
 });
 $('testEnvoi').addEventListener('click', () => envoyer('bonjour'));
 
+
+ // ---------- Pilotage de la barre ----------
+const joystickBarre = $('barre');
+const boutonBarre = joystickBarre.querySelector('.knob');
+const affichageBarre = $('vBar');
+
+let commandeBarre = 0;
+let barreActive = false;
+
+// Déplace visuellement le joystick et calcule la commande
+function deplacerBarre(positionX) {
+  const rect = joystickBarre.getBoundingClientRect();
+
+  // Course maximale du joystick, en tenant compte du bouton
+  const course = (rect.width - boutonBarre.offsetWidth) / 2;
+
+  // Position horizontale par rapport au centre du joystick
+  let deplacement = positionX - (rect.left + rect.width / 2);
+
+  // Limitation aux extrémités
+  deplacement = Math.max(-course, Math.min(course, deplacement));
+
+  // Déplacement visuel du bouton
+  boutonBarre.style.transform = `translateX(${deplacement}px)`;
+
+  // Conversion en commande de -100 à +100
+  commandeBarre = Math.round((deplacement / course) * 100);
+
+  // Affichage de la commande sur le site
+  affichageBarre.textContent = commandeBarre;
+
+  // Transmission Bluetooth
+  envoyer('BARRE:' + commandeBarre);
+}
+
+// Appui sur le joystick
+joystickBarre.addEventListener('pointerdown', (e) => {
+  if (!caracEcriture) {
+    journal('Connecte la micro:bit avant de piloter la barre');
+    return;
+  }
+
+  barreActive = true;
+  joystickBarre.classList.remove('off');
+  joystickBarre.classList.add('actif');
+
+  joystickBarre.setPointerCapture(e.pointerId);
+  deplacerBarre(e.clientX);
+});
+
+// Déplacement du doigt
+joystickBarre.addEventListener('pointermove', (e) => {
+  if (!barreActive) return;
+
+  deplacerBarre(e.clientX);
+});
+
+// Relâchement du doigt
+function relacherBarre() {
+  if (!barreActive) return;
+
+  barreActive = false;
+  commandeBarre = 0;
+
+  // Retour visuel au neutre
+  boutonBarre.style.transform = 'translateX(0px)';
+  affichageBarre.textContent = '0';
+
+  joystickBarre.classList.remove('actif');
+  joystickBarre.classList.add('off');
+
+  // Retour du servo au neutre
+  envoyer('BARRE:0');
+}
+
+joystickBarre.addEventListener('pointerup', relacherBarre);
+joystickBarre.addEventListener('pointercancel', relacherBarre);
+
 afficherLiaison();
 journal('Script version ' + VERSION_SCRIPT + ' chargé');
