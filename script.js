@@ -1,6 +1,6 @@
 
-// ---------- Bluetooth micro:bit : connexion, barre et états ----------
-const VERSION_SCRIPT = 4;
+ // ---------- Bluetooth micro:bit : connexion, barre et états ----------
+const VERSION_SCRIPT = 5;
 
 const UART_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
 const UART_RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
@@ -294,6 +294,10 @@ boutonPrincipal.addEventListener('pointerdown', e => {
         etat === ETATS.VERROUILLE
       ) {
         armementEffectue = true;
+
+        // Nouvelle commande Bluetooth : armement
+        envoyer('ARMER');
+
         changerEtat(ETATS.PRET);
       }
     }, DUREE_ARMEMENT);
@@ -338,8 +342,15 @@ boutonPrincipal.addEventListener('pointerup', e => {
     dernierAppui = 0;
 
     if (etat === ETATS.PRET) {
+      // Nouvelle commande Bluetooth : marche
+      envoyer('MARCHE');
+
       changerEtat(ETATS.EN_MARCHE);
+
     } else if (etat === ETATS.EN_MARCHE) {
+      // Nouvelle commande Bluetooth : arrêt
+      envoyer('ARRET');
+
       changerEtat(ETATS.PRET);
     }
 
