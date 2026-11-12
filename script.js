@@ -1,18 +1,16 @@
-// ---------- Bluetooth micro:bit : connexion, barre et états ----------
-const VERSION_SCRIPT = 6;
+// ---------- Bluetooth micro:bit : version 7 ----------
+const VERSION_SCRIPT = 7;
 
 const UART_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
 const UART_RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
-const UART_AUTRE = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
 
 const $ = id => document.getElementById(id);
 
 // ---------- Bluetooth ----------
 let appareil = null;
 let caracEcriture = null;
-let canauxUART = [];
-let methodeEcriture = null;
 let enConnexion = false;
+let deconnexionVoulue = false;
 let liaisonPerdue = false;
 let enEcriture = false;
 let commandeEnAttente = null;
@@ -39,7 +37,7 @@ function journal(texte) {
 }
 
 // ---------- Affichage ----------
-function afficherEtat() {
+function afficherLiaison() {
   const connecte = caracEcriture !== null;
 
   document.body.dataset.perdue = liaisonPerdue ? '1' : '0';
@@ -74,7 +72,7 @@ function changerEtat(nouvelEtat) {
 
   etat = nouvelEtat;
   journal('État : ' + etat);
-  afficherEtat();
+  afficherLiaison();
 }
 
 // ---------- Gestion des envois ----------
@@ -90,23 +88,24 @@ function surDeconnexion(e) {
   const etaitConnecte = caracEcriture !== null;
 
   caracEcriture = null;
-  canauxUART = [];
-  methodeEcriture = null;
   viderEnvois();
 
-  liaisonPerdue = etaitConnecte;
+  liaisonPerdue = etaitConnecte && !deconnexionVoulue;
 
   journal(
     liaisonPerdue ? 'Liaison perdue' : 'Déconnecté'
   );
 
+  deconnexionVoulue = false;
+
   relacherBarre(false);
   reinitialiserBoutonPrincipal();
+
   changerEtat(ETATS.NON_CONNECTE);
-  afficherEtat();
+  afficherLiaison();
 }
 
-// ---------- Connexion ----------
+// ---------- Connexion Bluetooth : base V3 ----------
 async function connecter() {
   if (enConnexion || caracEcriture) return;
 
@@ -118,7 +117,7 @@ async function connecter() {
   }
 
   enConnexion = true;
-  afficherEtat();
+  afficherLiaison();
 
   let candidat = null;
 
@@ -132,32 +131,7 @@ async function connecter() {
 
     const serveur = await candidat.gatt.connect();
     const service = await serveur.getPrimaryService(UART_SERVICE);
-
-    // Repère les caractéristiques UART réellement exposées.
-    const disponibles = await service.getCharacteristics();
-
-    canauxUART = disponibles.filter(c =>
-      c.uuid === UART_RX || c.uuid === UART_AUTRE
-    );
-
-    if (!canauxUART.length) {
-      throw new Error('Aucun canal UART trouvé');
-    }
-
-    // Si les propriétés sont disponibles,
-    // préférer un canal inscriptible.
-    // Sinon, commencer par le canal habituel.
-    canauxUART.sort((a, b) => {
-      const score = c =>
-        (
-          c.properties.write ||
-          c.properties.writeWithoutResponse
-        ) ? 1 : 0;
-
-      return score(b) - score(a);
-    });
-
-    const canal = canauxUART[0];
+    const canal = await service.getCharacteristic(UART_RX);
 
     if (appareil && appareil !== candidat) {
       appareil.removeEventListener(
@@ -174,7 +148,7 @@ async function connecter() {
     );
 
     caracEcriture = canal;
-    methodeEcriture = null;
+    deconnexionVoulue = false;
     liaisonPerdue = false;
 
     viderEnvois();
@@ -197,8 +171,6 @@ async function connecter() {
     );
 
     caracEcriture = null;
-    canauxUART = [];
-    methodeEcriture = null;
     viderEnvois();
 
     if (candidat && candidat.gatt.connected) {
@@ -218,56 +190,31 @@ async function connecter() {
 
   } finally {
     enConnexion = false;
-    afficherEtat();
+    afficherLiaison();
   }
 }
 
-// ---------- Envoi Bluetooth ----------
+// ---------- Déconnexion volontaire ----------
+function deconnecter() {
+  if (!appareil || !appareil.gatt.connected) return;
+
+  deconnexionVoulue = true;
+
+  caracEcriture = null;
+  viderEnvois();
+
+  relacherBarre(false);
+  reinitialiserBoutonPrincipal();
+
+  changerEtat(ETATS.NON_CONNECTE);
+  afficherLiaison();
+
+  appareil.gatt.disconnect();
+}
+
+// ---------- Envoi Bluetooth : base V3 ----------
 // Une seule écriture à la fois.
-// La dernière commande remplace les anciennes commandes en attente.
-
-async function ecrireUART(octets) {
-  const erreurs = [];
-
-  const methodes = methodeEcriture
-    ? [methodeEcriture]
-    : [
-        'writeValueWithoutResponse',
-        'writeValueWithResponse',
-        'writeValue'
-      ];
-
-  for (const canal of canauxUART) {
-    for (const methode of methodes) {
-      if (typeof canal[methode] !== 'function') continue;
-
-      try {
-        await canal[methode](octets);
-
-        caracEcriture = canal;
-        methodeEcriture = methode;
-        journal('Méthode UART : ' + methode);
-
-        return;
-
-      } catch (e) {
-        erreurs.push(
-          canal.uuid.slice(0, 8) +
-          '/' +
-          methode +
-          ': ' +
-          String(e)
-        );
-      }
-    }
-  }
-
-  throw new Error(
-    erreurs.length
-      ? erreurs.join(' ; ')
-      : 'Aucune méthode d’écriture UART disponible'
-  );
-}
+// La dernière commande remplace les commandes en attente.
 
 async function envoyer(texte) {
   if (!caracEcriture) return;
@@ -279,12 +226,13 @@ async function envoyer(texte) {
   enEcriture = true;
 
   const generation = generationLiaison;
+  const canal = caracEcriture;
 
   try {
     while (
       commandeEnAttente !== null &&
       generation === generationLiaison &&
-      caracEcriture !== null
+      caracEcriture === canal
     ) {
       const message = commandeEnAttente;
       commandeEnAttente = null;
@@ -293,7 +241,11 @@ async function envoyer(texte) {
         message + '\n'
       );
 
-      await ecrireUART(octets);
+      if (canal.properties.writeWithoutResponse) {
+        await canal.writeValueWithoutResponse(octets);
+      } else {
+        await canal.writeValue(octets);
+      }
 
       if (generation === generationLiaison) {
         journal('Envoyé : ' + message);
@@ -301,7 +253,7 @@ async function envoyer(texte) {
     }
 
   } catch (e) {
-    journal("Erreur d'envoi : " + String(e));
+    journal("Erreur d'envoi : " + e.message);
     commandeEnAttente = null;
 
   } finally {
@@ -358,7 +310,6 @@ boutonPrincipal.addEventListener('pointerdown', e => {
         armementEffectue = true;
 
         envoyer('ARMER');
-
         changerEtat(ETATS.PRET);
       }
     }, DUREE_ARMEMENT);
@@ -380,20 +331,20 @@ boutonPrincipal.addEventListener('pointerup', e => {
 
   if (enConnexion) return;
 
-  // Un appui simple connecte la micro:bit.
+  // Appui simple : connexion
   if (etat === ETATS.NON_CONNECTE) {
     dernierAppui = 0;
     connecter();
     return;
   }
 
-  // En état Verrouillé, seul l'appui long agit.
+  // État verrouillé : appui long uniquement
   if (etat === ETATS.VERROUILLE) {
     dernierAppui = 0;
     return;
   }
 
-  // Double appui : Prêt <-> En marche.
+  // Double appui : démarrage ou arrêt
   const maintenant = Date.now();
 
   if (
@@ -404,12 +355,10 @@ boutonPrincipal.addEventListener('pointerup', e => {
 
     if (etat === ETATS.PRET) {
       envoyer('MARCHE');
-
       changerEtat(ETATS.EN_MARCHE);
 
     } else if (etat === ETATS.EN_MARCHE) {
       envoyer('ARRET');
-
       changerEtat(ETATS.PRET);
     }
 
@@ -430,7 +379,6 @@ boutonPrincipal.addEventListener('lostpointercapture', e => {
   }
 });
 
-// Empêche le menu contextuel pendant l'appui long.
 boutonPrincipal.addEventListener('contextmenu', e => {
   e.preventDefault();
 });
@@ -440,7 +388,7 @@ $('testEnvoi').addEventListener('click', () => {
   envoyer('bonjour');
 });
 
-// ---------- Pilotage de la barre ----------
+// ---------- Pilotage proportionnel de la barre ----------
 const joystickBarre = $('barre');
 const boutonBarre = joystickBarre.querySelector('.knob');
 const affichageBarre = $('vBar');
@@ -485,12 +433,8 @@ function deplacerBarre(positionX) {
 joystickBarre.addEventListener('pointerdown', e => {
   if (pointeurBarre !== null) return;
 
-  if (!caracEcriture) {
-    journal(
-      'Connecte la micro:bit avant de piloter la barre'
-    );
-    return;
-  }
+  // Barre bloquée sans connexion.
+  if (!caracEcriture) return;
 
   pointeurBarre = e.pointerId;
 
@@ -546,15 +490,12 @@ joystickBarre.addEventListener('pointercancel', e => {
   }
 });
 
-joystickBarre.addEventListener(
-  'lostpointercapture',
-  e => {
-    if (e.pointerId === pointeurBarre) {
-      relacherBarre();
-    }
+joystickBarre.addEventListener('lostpointercapture', e => {
+  if (e.pointerId === pointeurBarre) {
+    relacherBarre();
   }
-);
+});
 
 // ---------- Initialisation ----------
-afficherEtat();
+afficherLiaison();
 journal('Script version ' + VERSION_SCRIPT + ' chargé');
