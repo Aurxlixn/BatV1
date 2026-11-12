@@ -1,6 +1,6 @@
 
  // ---------- Bluetooth micro:bit : connexion, barre et états ----------
-const VERSION_SCRIPT = 5;
+const VERSION_SCRIPT = 6;
 
 const UART_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
 const UART_RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
