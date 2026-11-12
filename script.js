@@ -1,15 +1,17 @@
-
- // ---------- Bluetooth micro:bit : connexion, barre et états ----------
+// ---------- Bluetooth micro:bit : connexion, barre et états ----------
 const VERSION_SCRIPT = 6;
 
 const UART_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
 const UART_RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+const UART_AUTRE = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
 
 const $ = id => document.getElementById(id);
 
 // ---------- Bluetooth ----------
 let appareil = null;
 let caracEcriture = null;
+let canauxUART = [];
+let methodeEcriture = null;
 let enConnexion = false;
 let liaisonPerdue = false;
 let enEcriture = false;
@@ -88,6 +90,8 @@ function surDeconnexion(e) {
   const etaitConnecte = caracEcriture !== null;
 
   caracEcriture = null;
+  canauxUART = [];
+  methodeEcriture = null;
   viderEnvois();
 
   liaisonPerdue = etaitConnecte;
@@ -128,7 +132,32 @@ async function connecter() {
 
     const serveur = await candidat.gatt.connect();
     const service = await serveur.getPrimaryService(UART_SERVICE);
-    const canal = await service.getCharacteristic(UART_RX);
+
+    // Repère les caractéristiques UART réellement exposées.
+    const disponibles = await service.getCharacteristics();
+
+    canauxUART = disponibles.filter(c =>
+      c.uuid === UART_RX || c.uuid === UART_AUTRE
+    );
+
+    if (!canauxUART.length) {
+      throw new Error('Aucun canal UART trouvé');
+    }
+
+    // Si les propriétés sont disponibles,
+    // préférer un canal inscriptible.
+    // Sinon, commencer par le canal habituel.
+    canauxUART.sort((a, b) => {
+      const score = c =>
+        (
+          c.properties.write ||
+          c.properties.writeWithoutResponse
+        ) ? 1 : 0;
+
+      return score(b) - score(a);
+    });
+
+    const canal = canauxUART[0];
 
     if (appareil && appareil !== candidat) {
       appareil.removeEventListener(
@@ -145,6 +174,7 @@ async function connecter() {
     );
 
     caracEcriture = canal;
+    methodeEcriture = null;
     liaisonPerdue = false;
 
     viderEnvois();
@@ -167,6 +197,8 @@ async function connecter() {
     );
 
     caracEcriture = null;
+    canauxUART = [];
+    methodeEcriture = null;
     viderEnvois();
 
     if (candidat && candidat.gatt.connected) {
@@ -194,6 +226,48 @@ async function connecter() {
 // Une seule écriture à la fois.
 // La dernière commande remplace les anciennes commandes en attente.
 
+async function ecrireUART(octets) {
+  const erreurs = [];
+
+  const methodes = methodeEcriture
+    ? [methodeEcriture]
+    : [
+        'writeValueWithoutResponse',
+        'writeValueWithResponse',
+        'writeValue'
+      ];
+
+  for (const canal of canauxUART) {
+    for (const methode of methodes) {
+      if (typeof canal[methode] !== 'function') continue;
+
+      try {
+        await canal[methode](octets);
+
+        caracEcriture = canal;
+        methodeEcriture = methode;
+
+        return;
+
+      } catch (e) {
+        erreurs.push(
+          canal.uuid.slice(0, 8) +
+          '/' +
+          methode +
+          ': ' +
+          String(e)
+        );
+      }
+    }
+  }
+
+  throw new Error(
+    erreurs.length
+      ? erreurs.join(' ; ')
+      : 'Aucune méthode d’écriture UART disponible'
+  );
+}
+
 async function envoyer(texte) {
   if (!caracEcriture) return;
 
@@ -204,13 +278,12 @@ async function envoyer(texte) {
   enEcriture = true;
 
   const generation = generationLiaison;
-  const canal = caracEcriture;
 
   try {
     while (
       commandeEnAttente !== null &&
       generation === generationLiaison &&
-      caracEcriture === canal
+      caracEcriture !== null
     ) {
       const message = commandeEnAttente;
       commandeEnAttente = null;
@@ -219,11 +292,7 @@ async function envoyer(texte) {
         message + '\n'
       );
 
-      if (canal.properties.writeWithoutResponse) {
-        await canal.writeValueWithoutResponse(octets);
-      } else {
-        await canal.writeValueWithoutResponse(octets);
-      }
+      await ecrireUART(octets);
 
       if (generation === generationLiaison) {
         journal('Envoyé : ' + message);
@@ -244,6 +313,7 @@ async function envoyer(texte) {
     ) {
       const dernierMessage = commandeEnAttente;
       commandeEnAttente = null;
+
       envoyer(dernierMessage);
     }
   }
@@ -286,7 +356,6 @@ boutonPrincipal.addEventListener('pointerdown', e => {
       ) {
         armementEffectue = true;
 
-        // Nouvelle commande Bluetooth : armement
         envoyer('ARMER');
 
         changerEtat(ETATS.PRET);
@@ -333,13 +402,11 @@ boutonPrincipal.addEventListener('pointerup', e => {
     dernierAppui = 0;
 
     if (etat === ETATS.PRET) {
-      // Nouvelle commande Bluetooth : marche
       envoyer('MARCHE');
 
       changerEtat(ETATS.EN_MARCHE);
 
     } else if (etat === ETATS.EN_MARCHE) {
-      // Nouvelle commande Bluetooth : arrêt
       envoyer('ARRET');
 
       changerEtat(ETATS.PRET);
