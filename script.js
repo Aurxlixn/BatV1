@@ -222,7 +222,7 @@ async function envoyer(texte) {
       if (canal.properties.writeWithoutResponse) {
         await canal.writeValueWithoutResponse(octets);
       } else {
-        await canal.writeValue(octets);
+        await canal.writeValueWithoutResponse(octets);
       }
 
       if (generation === generationLiaison) {
