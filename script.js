@@ -129,6 +129,8 @@ async function connecter() {
     const serveur = await candidat.gatt.connect();
     const service = await serveur.getPrimaryService(UART_SERVICE);
     const canal = await service.getCharacteristic(UART_RX);
+   journal('Écriture : ' + canal.properties.write);
+   journal('Sans réponse : ' + canal.properties.writeWithoutResponse);
 
     if (
       !canal.properties.write &&
