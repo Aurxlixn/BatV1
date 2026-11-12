@@ -246,6 +246,7 @@ async function ecrireUART(octets) {
 
         caracEcriture = canal;
         methodeEcriture = methode;
+        journal('Méthode UART : ' + methode);
 
         return;
 
