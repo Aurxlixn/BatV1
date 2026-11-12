@@ -129,10 +129,7 @@ async function connecter() {
     const serveur = await candidat.gatt.connect();
     const service = await serveur.getPrimaryService(UART_SERVICE);
     const canal = await service.getCharacteristic(UART_RX);
-   journal('Écriture : ' + canal.properties.write);
-   journal('Sans réponse : ' + canal.properties.writeWithoutResponse);
 
-    
     if (appareil && appareil !== candidat) {
       appareil.removeEventListener(
         'gattserverdisconnected',
@@ -234,7 +231,7 @@ async function envoyer(texte) {
     }
 
   } catch (e) {
-    journal("Erreur d'envoi : " + e.message);
+    journal("Erreur d'envoi : " + String(e));
     commandeEnAttente = null;
 
   } finally {
