@@ -132,15 +132,7 @@ async function connecter() {
    journal('Écriture : ' + canal.properties.write);
    journal('Sans réponse : ' + canal.properties.writeWithoutResponse);
 
-    if (
-      !canal.properties.write &&
-      !canal.properties.writeWithoutResponse
-    ) {
-      throw new Error(
-        "Le canal UART ne permet pas l'écriture"
-      );
-    }
-
+    
     if (appareil && appareil !== candidat) {
       appareil.removeEventListener(
         'gattserverdisconnected',
