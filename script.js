@@ -1,12 +1,15 @@
-// ---------- Pilotage du bateau : V8.5 (liaison + états + barre) ----------
-const VERSION_SCRIPT = '8.5';
+// ---------- Pilotage du bateau : V9 (liaison + états + barre + vitesse + retour + signe de vie) ----------
+const VERSION_SCRIPT = '9';
 
 // ---------- Réglages ----------
 const UART_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
-const ANGLE_BARRE_MAX = 40;    // degrés affichés à fond : doit égaler 100 x FACTEUR (0.4) du programme micro:bit
-const ZONE_MORTE = 6;          // en %, petite zone neutre au centre du joystick de barre
-const DUREE_ARMEMENT = 1000;   // ms de maintien pour réarmer
-const FENETRE_DOUBLE = 700;    // ms entre les deux appuis d'un double appui
+const ANGLE_BARRE_MAX = 40;              // degrés affichés à fond : doit égaler 100 x FACTEUR (0.4) du programme micro:bit
+const ZONE_MORTE = 6;                    // en %, petite zone neutre au centre des joysticks
+const DUREE_ARMEMENT = 1000;             // ms de maintien pour réarmer
+const FENETRE_DOUBLE = 700;              // ms entre les deux appuis d'un double appui
+const PERIODE_BATTEMENT = 200;           // ms : la page renvoie barre et vitesse (signe de vie)
+const DELAI_SANS_RETOUR = 3000;          // ms : la micro:bit ne répond plus -> liaison perdue
+const DUREE_REPETITION_URGENCE = 1000;   // ms : l'ordre URGENCE est répété jusqu'à confirmation
 
 const $ = id => document.getElementById(id);
 
@@ -26,15 +29,24 @@ let enConnexion = false;
 let deconnexionVoulue = false;
 let liaisonPerdue = false;
 
-let fileEvenements = [];       // ordres importants : jamais écrasés, envoyés dans l'ordre
-let positionEnAttente = null;  // seule la dernière position de barre compte
+let fileEvenements = [];                    // ordres importants : jamais écrasés, envoyés dans l'ordre
+let positions = { BARRE: null, VIT: null }; // seule la dernière position de chaque type compte
 let enEcriture = false;
 let generationLiaison = 0;
+let derniereErreurEnvoi = 0;
+
+let timerBattement = null;
+let retourActif = false;       // vrai dès que la micro:bit a répondu une fois
+let etatMicro = null;          // dernier état annoncé par la micro:bit (0, 1 ou 2)
+let dernierRetour = 0;
+let tamponRetour = '';
+let urgenceJusqua = 0;
 
 let pointeurAct = null, minuteurArmement = null, armementFait = false;
 let armeJusqua = 0, minuteurDouble = null;
 
 let pointeurBarre = null, derniereCommandeBarre = null, pctBarre = 0;
+let pointeurGaz = null, derniereCommandeGaz = null, vitesse = 0;
 
 // ---------- Journal ----------
 function journal(texte) {
@@ -51,6 +63,7 @@ function formatAngle(pct) {
 
 function majValeurs() {
   $('vBar').textContent = etat === 'deconnecte' ? '—' : formatAngle(pctBarre);
+  $('vVit').textContent = etat === 'deconnecte' ? '—' : (vitesse > 0 ? '+' : '') + vitesse + ' %';
 }
 
 function afficherEcran() {
@@ -71,6 +84,7 @@ function afficherEcran() {
   $('testEnvoi').disabled = !connecte;
   $('urgence').disabled = !pilotable;
   $('barre').classList.toggle('off', !pilotable);
+  $('gaz').classList.toggle('off', etat !== 'marche');     // vitesse : seulement en marche
   majValeurs();
 }
 
@@ -79,29 +93,34 @@ function changerEtat(nouveau) {
   etat = nouveau;
   annulerDoubleAppui();
   if (nouveau !== 'pret' && nouveau !== 'marche') relacherBarre(true);
+  if (nouveau !== 'marche') relacherGaz(true);
   journal('État : ' + ETATS[nouveau].nom);
   afficherEcran();
 }
 
 // ---------- Envoi Bluetooth ----------
 // Les ordres (ARMER, MARCHE, ARRET, URGENCE...) passent toujours, dans l'ordre.
-// Pour la barre, seule la dernière position compte : les anciennes sont abandonnées.
+// Pour la barre et la vitesse, seule la dernière position compte : les anciennes sont abandonnées.
 function viderEnvois() {
   generationLiaison++;
   fileEvenements = [];
-  positionEnAttente = null;
+  positions = { BARRE: null, VIT: null };
 }
 
-function envoyerEvenement(texte) {
+function envoyerEvenement(texte, muet = false) {
   if (!caracEcriture) return;
-  fileEvenements.push(texte);
+  fileEvenements.push({ texte, muet });
   pomper();
 }
 
 function envoyerPosition(texte) {
   if (!caracEcriture) return;
-  positionEnAttente = texte;
+  positions[texte.split(':')[0]] = texte;
   pomper();
+}
+
+function resteAEnvoyer() {
+  return fileEvenements.length > 0 || positions.BARRE !== null || positions.VIT !== null;
 }
 
 async function pomper() {
@@ -111,13 +130,17 @@ async function pomper() {
   const canal = caracEcriture;
   try {
     while (canal && generation === generationLiaison && caracEcriture === canal) {
-      let message, estPosition = false;
+      let message, muet = true;
       if (fileEvenements.length > 0) {
-        message = fileEvenements.shift();
-      } else if (positionEnAttente !== null) {
-        message = positionEnAttente;
-        positionEnAttente = null;
-        estPosition = true;
+        const ev = fileEvenements.shift();
+        message = ev.texte;
+        muet = ev.muet;
+      } else if (positions.BARRE !== null) {
+        message = positions.BARRE;
+        positions.BARRE = null;
+      } else if (positions.VIT !== null) {
+        message = positions.VIT;
+        positions.VIT = null;
       } else {
         break;
       }
@@ -125,28 +148,95 @@ async function pomper() {
         const octets = new TextEncoder().encode(message + '\n');
         if (canal.properties.writeWithoutResponse) await canal.writeValueWithoutResponse(octets);
         else await canal.writeValue(octets);
-        if (!estPosition && generation === generationLiaison) journal('Envoyé : ' + message);
+        if (!muet && generation === generationLiaison) journal('Envoyé : ' + message);
       } catch (e) {
-        journal("Erreur d'envoi (" + message + ') : ' + e.message);
+        if (Date.now() - derniereErreurEnvoi > 1000) {   // évite d'inonder le journal
+          derniereErreurEnvoi = Date.now();
+          journal("Erreur d'envoi (" + message + ') : ' + e.message);
+        }
       }
     }
   } finally {
     enEcriture = false;
     // Des messages ont pu arriver pendant la fin de l'écriture, ou avec une nouvelle connexion.
-    if (caracEcriture && (fileEvenements.length > 0 || positionEnAttente !== null)) pomper();
+    if (caracEcriture && resteAEnvoyer()) pomper();
   }
+}
+
+// ---------- Retour de la micro:bit (elle annonce son état : "E:0", "E:1" ou "E:2") ----------
+function surRetour(ev) {
+  tamponRetour += new TextDecoder().decode(ev.target.value);
+  let i;
+  while ((i = tamponRetour.indexOf('\n')) >= 0) {
+    const ligne = tamponRetour.slice(0, i).trim();
+    tamponRetour = tamponRetour.slice(i + 1);
+    traiterRetour(ligne);
+  }
+  if (tamponRetour.length > 200) tamponRetour = '';
+}
+
+function traiterRetour(ligne) {
+  dernierRetour = Date.now();
+  if (!ligne.startsWith('E:')) return;
+  const n = parseInt(ligne.slice(2), 10);
+  if (n !== 0 && n !== 1 && n !== 2) return;
+  if (!retourActif) { retourActif = true; journal('Retour de la micro:bit actif'); }
+  etatMicro = n;
+  if (n === 0) urgenceJusqua = 0;                   // verrouillage confirmé
+  else if (Date.now() < urgenceJusqua) return;      // message ancien : la carte n'a pas encore reçu l'urgence
+  const cle = ['verrouille', 'pret', 'marche'][n];
+  if (!caracEcriture || cle === etat) return;
+  if (n === 0 && (etat === 'pret' || etat === 'marche')) journal("La micro:bit s'est verrouillée");
+  changerEtat(cle);
+}
+
+// Une demande d'état (ARMER, MARCHE, ARRET). Avec le retour de la micro:bit, c'est elle qui décide :
+// la page attend sa confirmation. Sans retour, elle change d'état tout de suite, comme avant.
+function demander(ordre, etatVise) {
+  envoyerEvenement(ordre);
+  if (!retourActif) changerEtat(etatVise);
+}
+
+// ---------- Signe de vie ----------
+function battement() {
+  if (!caracEcriture) return;
+  // L'ordre URGENCE est répété jusqu'à ce que la micro:bit confirme son verrouillage
+  if (Date.now() < urgenceJusqua && etatMicro !== 0) envoyerEvenement('URGENCE', true);
+  // La page renvoie la position courante : c'est le signe de vie attendu par la micro:bit
+  envoyerPosition('BARRE:' + pctBarre);
+  envoyerPosition('VIT:' + vitesse);
+  // La micro:bit annonce son état toutes les 500 ms : si elle se tait, la liaison est perdue
+  if (retourActif && Date.now() - dernierRetour > DELAI_SANS_RETOUR) {
+    journal('Plus de réponse de la micro:bit');
+    perteDeLiaison();
+  }
+}
+
+function perteDeLiaison() {
+  deconnexionVoulue = false;
+  const a = appareil;
+  surDeconnexion({ target: a });       // met l'écran à jour tout de suite
+  try { if (a && a.gatt.connected) a.gatt.disconnect(); } catch (_) {}
 }
 
 // ---------- Connexion ----------
 function surDeconnexion(e) {
-  if (e && e.target !== appareil) return;   // ignore un ancien appareil
+  if (e && e.target !== appareil) return;                         // ignore un ancien appareil
+  if (caracEcriture === null && etat === 'deconnecte') return;    // déjà traité
   const etaitConnecte = caracEcriture !== null;
   caracEcriture = null;
+  clearInterval(timerBattement);
+  timerBattement = null;
   viderEnvois();
   liaisonPerdue = etaitConnecte && !deconnexionVoulue;
   journal(liaisonPerdue ? 'Liaison perdue' : 'Déconnecté');
   deconnexionVoulue = false;
+  retourActif = false;
+  etatMicro = null;
+  tamponRetour = '';
+  urgenceJusqua = 0;
   relacherBarre(false);
+  relacherGaz(false);
   reinitialiserBouton();
   changerEtat('deconnecte');
   afficherEcran();
@@ -175,6 +265,21 @@ async function connecter() {
     const canal = canaux.find(c => c.properties.write || c.properties.writeWithoutResponse);
     if (!canal) throw new Error("Aucun canal d'écriture trouvé");
 
+    // Canal de retour (notifications) : facultatif, la connexion marche aussi sans lui
+    const canalRetour = canaux.find(c => c.properties.notify);
+    let retourDemarre = false;
+    if (canalRetour) {
+      try {
+        await canalRetour.startNotifications();
+        canalRetour.addEventListener('characteristicvaluechanged', surRetour);
+        retourDemarre = true;
+      } catch (e) {
+        journal('Pas de retour de la micro:bit : ' + e.message);
+      }
+    } else {
+      journal('Pas de canal de retour sur la micro:bit');
+    }
+
     // On ne publie la connexion qu'une fois toute l'initialisation réussie
     if (appareil && appareil !== candidat) {
       appareil.removeEventListener('gattserverdisconnected', surDeconnexion);
@@ -187,8 +292,18 @@ async function connecter() {
     viderEnvois();
     pctBarre = 0;
     derniereCommandeBarre = null;
+    vitesse = 0;
+    derniereCommandeGaz = null;
+    retourActif = false;
+    etatMicro = null;
+    tamponRetour = '';
+    urgenceJusqua = 0;
+    dernierRetour = Date.now();
+    clearInterval(timerBattement);
+    timerBattement = setInterval(battement, PERIODE_BATTEMENT);
     journal("Canal d'écriture : " + canal.uuid.slice(0, 8));
     journal('Connecté à ' + (appareil.name || 'micro:bit'));
+    journal(retourDemarre ? 'Retour de la micro:bit : en attente' : 'Mode sans retour de la micro:bit');
     changerEtat('verrouille');              // toute connexion démarre verrouillée
   } catch (e) {
     journal(e.name === 'NotFoundError' ? 'Aucun appareil choisi' : 'Échec : ' + e.message);
@@ -206,15 +321,18 @@ async function connecter() {
   }
 }
 
+// Déconnexion voulue (utilisable dès qu'un bouton d'id "deco" existe dans la page)
 function deconnecter() {
   if (!appareil || !appareil.gatt.connected) return;
   deconnexionVoulue = true;
   caracEcriture = null;
   viderEnvois();
   relacherBarre(false);
+  relacherGaz(false);
   afficherEcran();
-  appareil.gatt.disconnect();
+  appareil.gatt.disconnect();   // la micro:bit se verrouille d'elle-même à la déconnexion
 }
+if ($('deco')) $('deco').addEventListener('click', deconnecter);
 
 // ---------- Bouton principal : se connecter / réarmer (maintien) / démarrer, arrêter (double appui) ----------
 const act = $('act');
@@ -248,8 +366,7 @@ act.addEventListener('pointerdown', e => {
       if (pointeurAct === e.pointerId && caracEcriture && etat === 'verrouille') {
         armementFait = true;
         jauge.classList.remove('go');
-        envoyerEvenement('ARMER');
-        changerEtat('pret');
+        demander('ARMER', 'pret');
       }
     }, DUREE_ARMEMENT);
   }
@@ -269,8 +386,8 @@ act.addEventListener('pointerup', e => {
 
   if (Date.now() < armeJusqua) {                   // second appui dans la fenêtre : on valide
     annulerDoubleAppui();
-    if (etat === 'pret') { envoyerEvenement('MARCHE'); changerEtat('marche'); }
-    else if (etat === 'marche') { envoyerEvenement('ARRET'); changerEtat('pret'); }
+    if (etat === 'pret') demander('MARCHE', 'marche');
+    else if (etat === 'marche') demander('ARRET', 'pret');
     afficherEcran();
   } else {                                         // premier appui : on arme et on le montre
     armeJusqua = Date.now() + FENETRE_DOUBLE;
@@ -287,10 +404,11 @@ act.addEventListener('lostpointercapture', e => {
 });
 act.addEventListener('contextmenu', e => e.preventDefault());
 
-// ---------- Urgence : un seul appui, réagit dès le contact ----------
+// ---------- Urgence : un seul appui, réagit dès le contact, verrouille tout de suite ----------
 $('urgence').addEventListener('pointerdown', e => {
   if (etat !== 'pret' && etat !== 'marche') return;
   e.preventDefault();
+  urgenceJusqua = Date.now() + DUREE_REPETITION_URGENCE;
   envoyerEvenement('URGENCE');
   changerEtat('verrouille');
 });
@@ -355,6 +473,65 @@ joystickBarre.addEventListener('pointercancel', e => {
 });
 joystickBarre.addEventListener('lostpointercapture', e => {
   if (e.pointerId === pointeurBarre) relacherBarre();
+});
+
+// ---------- Joystick de vitesse (vertical : haut = avant, bas = arrière, revient à 0 quand on le lâche) ----------
+const joystickGaz = $('gaz');
+const boutonGaz = joystickGaz.querySelector('.knob');
+
+function deplacerGaz(positionY) {
+  const rect = joystickGaz.getBoundingClientRect();
+  const course = (rect.height - boutonGaz.offsetHeight) / 2;
+  if (course <= 0) return;
+  let deplacement = positionY - (rect.top + rect.height / 2);   // positif = vers le bas
+  deplacement = Math.max(-course, Math.min(course, deplacement));
+  boutonGaz.style.transform = `translateY(${deplacement}px)`;
+  let pct = Math.round(-deplacement / course * 100);            // vers le haut = avant = positif
+  if (Math.abs(pct) < ZONE_MORTE) pct = 0;
+  vitesse = pct;
+  majValeurs();
+  if (pct !== derniereCommandeGaz) {
+    derniereCommandeGaz = pct;
+    envoyerPosition('VIT:' + pct);
+  }
+}
+
+function relacherGaz(transmettre = true) {
+  if (pointeurGaz === null) return;
+  const id = pointeurGaz;
+  pointeurGaz = null;
+  vitesse = 0;
+  boutonGaz.style.transform = 'translateY(0px)';
+  joystickGaz.classList.remove('actif');
+  if (joystickGaz.hasPointerCapture(id)) joystickGaz.releasePointerCapture(id);
+  majValeurs();
+  if (transmettre && caracEcriture) {
+    derniereCommandeGaz = 0;
+    envoyerPosition('VIT:0');
+  } else {
+    derniereCommandeGaz = null;
+  }
+}
+
+joystickGaz.addEventListener('pointerdown', e => {
+  if (pointeurGaz !== null) return;
+  if (!caracEcriture || etat !== 'marche') return;               // vitesse active seulement En marche
+  pointeurGaz = e.pointerId;
+  joystickGaz.classList.add('actif');
+  joystickGaz.setPointerCapture(e.pointerId);
+  deplacerGaz(e.clientY);
+});
+joystickGaz.addEventListener('pointermove', e => {
+  if (e.pointerId === pointeurGaz) deplacerGaz(e.clientY);
+});
+joystickGaz.addEventListener('pointerup', e => {
+  if (e.pointerId === pointeurGaz) relacherGaz();
+});
+joystickGaz.addEventListener('pointercancel', e => {
+  if (e.pointerId === pointeurGaz) relacherGaz();
+});
+joystickGaz.addEventListener('lostpointercapture', e => {
+  if (e.pointerId === pointeurGaz) relacherGaz();
 });
 
 // ---------- Démarrage ----------
